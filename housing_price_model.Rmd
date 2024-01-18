@@ -1,0 +1,840 @@
+---
+title: "STA 141A Final Project"
+output:
+  pdf_document: default
+  html_document: default
+date: "2023-12-04"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+# load libraries
+library(tidyverse)
+library(ggplot2)
+library(gridExtra)
+library(dplyr)
+library(tidyr)
+library(corrplot)
+library(caret)
+```
+
+```{r}
+# load datasets
+orig_train = read.csv("train.csv")
+orig_test = read.csv("test.csv")
+train = read.csv("train.csv")
+test = read.csv("test.csv")
+```
+
+```{r}
+head(train)
+```
+
+# Data Cleaning/Pre-processing
+
+As one of our goals is determining most significant predictors (not necessarily determining predicting the sale price of the home), in the data cleaning section I will be removing/combining many of the minor variables in order to help simplify the data set.
+
+```{r}
+# Function counting missing values
+missing =  sapply(train, function(x) {
+  sum(is.na(x)) / length(x) * 100
+})
+missing_df = data.frame(Missing_Percentages = missing)
+missing_df = missing_df %>%
+  arrange(desc(Missing_Percentages))
+missing_df = missing_df[missing_df$Missing_Percentages > 0, , drop = F]
+missing_df # percentage of columns with NA values
+```
+
+### Dealing with Numerical Variables
+
+```{r}
+# Removing id column as irrelevant
+train = train[,-1]
+```
+
+```{r}
+# Variables leaving as is: MSSubClass, LotArea, OverallQual, OverallCond, TotalBsmtSF, BedroomAbvGr, KitchenAbvGr, TotRmsAbvGrd, Fireplaces, GarageCars, GarageArea, LotConfig, MSZoning, LandSlope, Neighborhoods, ExteriorCond, ExteriorQual, HeatingQC, KitchenQual
+```
+
+```{r}
+# PoolArea and PoolQC
+# Add variable to check for pool or not due to large amount of missing values
+train$HasPool <- ifelse(train$PoolArea > 0 | !is.na(train$PoolQC), 1, 0)
+train$HasPool <- factor(train$HasPool)
+
+# Removing others due to missing variables
+train$PoolArea <- NULL
+train$PoolQC <- NULL
+``` 
+
+```{r}
+# LotFrontage
+# Due to unknown meaning of NA, removing:
+train$LotFrontage <- NULL
+```
+
+```{r}
+# Date variables
+# Removing MoSold as YrSold is sufficient
+train$MoSold <- NULL
+
+# Creating a new variable for the age of the house at the time of the sale
+train$AgeAtSale <- train$YrSold - train$YearBuilt
+
+# Creating a new variable for the age of the house since its last remodel at the time of the sale
+train$YearsSinceRemodel <- train$YrSold - train$YearRemodAdd
+
+# Removing this as there are missing values
+train$GarageYrBlt = NULL
+```
+
+```{r}
+# Masonry Veneer Area
+# Dealing with NA values, setting to 0
+train$MasVnrArea[is.na(train$MasVnrArea)] <- 0
+```
+
+```{r}
+# Basement Square Footage and Above Grade Square Footage
+# Only keeping total square feet for basement, removing extra variables
+# If conducting a more in-depth analysis, it might be better to keep these
+train$BsmtUnfSF = NULL
+train$BsmtFinSF1 = NULL
+train$BsmtFinSF2 =NULL
+
+# Keeping total square feet for above grade, as 1st and 2nd floor square feet are components to total
+# Keeping low quality square feet as it seems like an interesting statistic
+train$X1stFlrSF = NULL
+train$X2ndFlrSF = NULL
+```
+
+```{r}
+# Basement Bathrooms, combining into one variable to simplify the data
+train$BsmtBaths <- train$BsmtFullBath + train$BsmtHalfBath * 0.5
+train$BsmtFullBath <- NULL
+train$BsmtHalfBath <- NULL
+```
+
+```{r}
+# Above grade bathrooms, also combining to simplify
+train$TotalBaths <- train$FullBath + train$HalfBath * 0.5
+train$FullBath <- NULL
+train$HalfBath <- NULL
+```
+
+```{r}
+# Outside square footage
+# Combining all into one variable
+train$TotalOutSideSF = train$WoodDeckSF + train$OpenPorchSF + train$EnclosedPorch + train$X3SsnPorch + train$ScreenPorch
+
+train$WoodDeckSF = NULL
+train$OpenPorchSF = NULL
+train$EnclosedPorch = NULL
+train$X3SsnPorch = NULL
+train$ScreenPorch = NULL
+```
+
+### Dealing with Categorical Variables
+
+```{r}
+# MSZoning, leaving as is
+price <- summarize(group_by(train, MSZoning),
+          mean(SalePrice, na.rm=T))
+```
+
+```{r}
+summarize(group_by(train, Street),
+          mean(SalePrice, na.rm=T))
+# Updated Street to binary, changed to 1 if road access is paved, 0 if not
+train$Street <- ifelse(train$Street == "Pave", 1, 0)
+
+summarize(group_by(train, Alley),
+          mean(SalePrice, na.rm=T))
+# Updated Alley to binary , 1 if there is alley access to the property, 0 if not
+train$Alley <- ifelse(is.na(train$Alley), 0, 1)
+```
+
+```{r}
+# Lot Variables
+summarize(group_by(train, LotConfig),
+          mean(SalePrice, na.rm=T))
+# Creating new binary variable, 1 if lot shape is regular, 0 if not
+train$LotShape_Regular <- ifelse(train$LotShape == "Reg", 1, 0)
+train$LotShape = NULL
+
+# Creating new binary variable, 1 if land is flat, 0 if not
+train$isFlat <- ifelse(train$LandContour == "Lvl", 1, 0)
+train$LandContour <- NULL
+```
+
+```{r}
+# Utilities, 1 for has all the utilities (sewer, electricity, etc.), 0 if the property is missing any of these
+summarize(group_by(train, Utilities),
+          mean(SalePrice, na.rm=T))
+train$AllUtilities <- ifelse(train$Utilities == "AllPub", 1, 0)
+train$Utilities = NULL
+
+# Electricity, excluding due to unknown variable meanings
+train$Electrical = NULL
+```
+
+```{r}
+# Land Slope
+summarize(group_by(train, LandSlope),
+          mean(SalePrice, na.rm=T))
+# Unexpected correlation, will keep all separate
+```
+
+```{r}
+# Condition Proximity
+summarize(group_by(train, Condition1),
+          mean(SalePrice, na.rm=T))
+
+# Creating binary variable, 1 if property is located near a positive feature, 0 otherwise
+train$NearPositiveFeature1 <- ifelse(train$Condition1 %in% c("PosA", "PosN"), 1, 0)
+# Indicates the presence of a second positive feature
+train$NearPositiveFeature2 <- ifelse(train$Condition1 %in% c("PosA", "PosN"), 1, 0)
+
+# Creating binary variable, 1 if property is located near a railroad, 0 otherwise
+train$NearRailroad1 <- ifelse(train$Condition1 %in% c("RRNn", "RRAn", "RRNe", "RRAe"), 1, 0)
+# Indicates the presence of a second railroad
+train$NearRailroad2 <- ifelse(train$Condition1 %in% c("RRNn", "RRAn", "RRNe", "RRAe"), 1, 0)
+
+# Initial variables, not needed as they have been condensed into the above variables
+train$Condition1 <- NULL
+train$Condition2 <- NULL
+```
+
+```{r}
+# Building Type
+summarize(group_by(train, BldgType),
+          mean(SalePrice, na.rm=T))
+
+# Combining townhouse variable into one and splitting into four different binary variables indicating the type of building
+train$One_family_building <- ifelse(train$BldgType == "1Fam", 1, 0)
+train$Two_family_conversion <- ifelse(train$BldgType == "2fmCon", 1, 0)
+train$Duplex <- ifelse(train$BldgType == "Duplex", 1, 0)
+train$Townhouse <- ifelse(train$BldgType %in% c("TwnhsE", "Twnhs"), 1, 0)
+
+# Removing initial variable
+train$BldgType <- NULL
+```
+
+```{r}
+# House Style
+summarize(group_by(train, HouseStyle),
+          mean(SalePrice, na.rm=T))
+
+# Splitting HouseStyle into three different binary variables
+train$Split_style <- ifelse(train$HouseStyle %in% c("SLvl", "SFoyer"), 1, 0) 
+train$Less_than_two_story <- ifelse(train$HouseStyle %in% c("1Story", "1.5Fin", "1.5Unf"), 1, 0)
+train$Two_story_plus <- ifelse(train$HouseStyle %in% c("2Story", "2.5Fin", "2.5Unf"), 1, 0)
+
+# Removing initial variable
+train$HouseStyle <- NULL
+```
+
+```{r}
+# Roof + Exterior + Masonry Veneer + Foundation
+summarize(group_by(train, RoofStyle),
+          mean(SalePrice, na.rm=T))
+# Leaving out
+train$RoofStyle <- NULL
+
+summarize(group_by(train, RoofMatl),
+          mean(SalePrice, na.rm=T))
+
+train$RoofMatl <- NULL
+
+# Same with Exterior + Foundation
+train$Exterior1st <- NULL
+train$Exterior2nd <- NULL
+train$Foundation <- NULL
+
+# Leaving exterior condition and quality 
+
+summarize(group_by(train, MasVnrType),
+          mean(SalePrice, na.rm=T))
+
+train$hasMasVnr <- ifelse(is.na(train$MasVnrType), 0, 1)
+
+train$MasVnrType <- NULL
+
+```
+
+```{r}
+# Basement
+# Leaving quality and condition the same, cleaning NA values
+train$BsmtQual = ifelse(is.na(train$BsmtQual), "None", train$BsmtQual) 
+train$BsmtCond = ifelse(is.na(train$BsmtCond), "None", train$BsmtCond) 
+
+# Exposure
+# Leaving exposure the same, cleaning NA values
+train$BsmtExposure = ifelse(is.na(train$BsmtExposure), "No", train$BsmtExposure) 
+
+
+# Finished Types, updating to binary, 1 for seemingly good qualities, 0 for seemingly bad qualities
+train$BsmtFinType1[train$BsmtFinType1 %in% c("GLQ", "ALQ", "Rec")] <- 1 
+train$BsmtFinType1[train$BsmtFinType1 %in% c("BLQ", "LwQ", "Unf")] <- 0
+train$BsmtFinType1[is.na(train$BsmtFinType1)] <- 0
+
+# Indicates presence of a second feature
+train$BsmtFinType2[train$BsmtFinType2 %in% c("GLQ", "ALQ", "Rec")] <- 1 
+train$BsmtFinType2[train$BsmtFinType2 %in% c("BLQ", "LwQ", "Unf")] <- 0
+train$BsmtFinType2[is.na(train$BsmtFinType2)] <- 0
+```
+
+```{r}
+# Heating + CentralAir
+# Leaving out heating types as unsure of quality
+train$Heating <- NULL
+
+# Updating CentralAir to binary, 
+train$CentralAir <- ifelse(train$CentralAir == "Y", 1, 0)
+```
+
+```{r}
+# Functionality
+# Due to unclear descriptions in data description, leaving variable out of analysis
+train$Function <- NULL
+```
+
+```{r}
+# Fireplaces
+# Cleaning NA values
+train$FireplaceQu = ifelse(is.na(train$FireplaceQu), "None", train$FireplaceQu) 
+
+```
+
+```{r}
+# Garage
+# Cleaning NA values
+train$GarageQual = ifelse(is.na(train$GarageQual), "None", train$GarageQual) 
+train$GarageCond = ifelse(is.na(train$GarageCond), "None", train$GarageCond)
+# Creating new binary variable, 1 if there is a garage on the property, 0 if there is no garage
+train$HasGarage <- ifelse(is.na(train$GarageType), 0, 1)  
+
+# Removing unnecessary variables
+train$GarageType <- NULL
+train$GarageFinish <- NULL
+```
+
+```{r}
+# Paved driveway
+# Updating paved driveway to binary, 1 for a paved driveway, 0 for unpaved
+train$PavedDrive[train$PavedDrive == "Y"] <- 1
+train$PavedDrive[!train$PavedDrive != "Y"] <- 0
+train$PavedDrive[is.na(train$PavedDrive)] <- 0
+```
+
+```{r}
+# Fence 
+# Updated to binary, 1 if there is a fence, 0 if there isn't
+train$Fence[train$Fence %in% c("GdPrv", "MnPrv", "GdWo","MnWw")] <- 1
+train$Fence[is.na(train$Fence)] <- 0
+```
+
+```{r}
+# MiscFeature and MiscVal variables
+# Average value of miscellaneous feature
+mean(train$MiscVal[train$MiscVal != 0])
+
+# Due to the value being relatively modest compared to the average final sale price of the home, we will exclude it
+train$MiscFeature <- NULL
+train$MiscVal <- NULL
+```
+
+```{r}
+# Sale Type + Sale Condition
+# Unsure of quality of each type, excluding
+train$SaleType = NULL
+train$SaleCondition = NULL
+```
+
+Done with pre-processing
+
+```{r}
+# Double checking for missing values
+missing =  sapply(train, function(x) {
+  sum(is.na(x)) / length(x) * 100
+})
+missing_df = data.frame(Missing_Percentages = missing)
+missing_df = missing_df %>%
+  arrange(desc(Missing_Percentages))
+missing_df = missing_df[missing_df$Missing_Percentages > 0, , drop = F]
+missing_df # percentage of columns with NA values
+```
+
+```{r}
+# Correlation Matrix for numeric variables
+numeric_vars <- sapply(train, is.numeric)
+cor_matrix <- cor(train[, numeric_vars], use = "pairwise.complete.obs")
+
+corrplot(cor_matrix, method = "square",
+         tl.cex = 0.5, 
+         tl.srt = 90,  
+         addrect = 5)
+```
+
+```{r}
+# Correlation Matrix using all original data for reference (delete later)
+numeric_vars <- sapply(orig_train, is.numeric)
+cor_matrix <- cor(orig_train[, numeric_vars], use = "pairwise.complete.obs")
+
+corrplot(cor_matrix, method = "square",
+         tl.cex = 0.5, 
+         tl.srt = 45,  
+         addrect = 5)
+```
+
+As we made many changes to the training data all the steps must also be applied to the test data:
+
+```{r}
+test = test[,-1]
+test$HasPool <- ifelse(test$PoolArea > 0 | !is.na(test$PoolQC), 1, 0)
+test$PoolArea <- NULL
+test$PoolQC <- NULL
+test$LotFrontage <- NULL
+test$MoSold <- NULL
+test$AgeAtSale <- test$YrSold - test$YearBuilt
+test$YearsSinceRemodel <- test$YrSold - test$YearRemodAdd
+test$GarageYrBlt = NULL
+test$MasVnrArea[is.na(test$MasVnrArea)] <- 0
+test$BsmtUnfSF = NULL
+test$BsmtFinSF1 = NULL
+test$BsmtFinSF2 =NULL
+test$X1stFlrSF = NULL
+test$X2ndFlrSF = NULL
+test$BsmtBaths <- test$BsmtFullBath + test$BsmtHalfBath * 0.5
+test$BsmtFullBath <- NULL
+test$BsmtHalfBath <- NULL
+test$TotalBaths <- test$FullBath + test$HalfBath * 0.5
+test$FullBath <- NULL
+test$HalfBath <- NULL
+test$TotalOutSideSF = test$WoodDeckSF + test$OpenPorchSF + test$EnclosedPorch + test$X3SsnPorch + test$ScreenPorch
+test$WoodDeckSF = NULL
+test$OpenPorchSF = NULL
+test$EnclosedPorch = NULL
+test$X3SsnPorch = NULL
+test$ScreenPorch = NULL
+test$Street <- ifelse(test$Street == "Pave", 1, 0)
+test$Alley <- ifelse(is.na(test$Alley), 0, 1)
+test$LotShape_Regular <- ifelse(test$LotShape == "Reg", 1, 0)
+test$LotShape = NULL
+test$isFlat <- ifelse(test$LandContour == "Lvl", 1, 0)
+test$LandContour <- NULL
+test$AllUtilities <- ifelse(test$Utilities == "AllPub", 1, 0)
+test$Utilities = NULL
+test$Electrical = NULL
+test$NearPositiveFeature1 <- ifelse(test$Condition1 %in% c("PosA", "PosN"), 1, 0)
+test$NearPositiveFeature2 <- ifelse(test$Condition1 %in% c("PosA", "PosN"), 1, 0)
+test$NearRailroad1 <- ifelse(test$Condition1 %in% c("RRNn", "RRAn", "RRNe", "RRAe"), 1, 0)
+test$NearRailroad2 <- ifelse(test$Condition1 %in% c("RRNn", "RRAn", "RRNe", "RRAe"), 1, 0)
+test$Condition1 <- NULL
+test$Condition2 <- NULL
+test$One_family_building <- ifelse(test$BldgType == "1Fam", 1, 0)
+test$Two_family_conversion <- ifelse(test$BldgType == "2fmCon", 1, 0)
+test$Duplex <- ifelse(test$BldgType == "Duplex", 1, 0)
+test$Townhouse <- ifelse(test$BldgType %in% c("TwnhsE", "Twnhs"), 1, 0)
+test$BldgType <- NULL
+test$Split_style <- ifelse(test$HouseStyle %in% c("SLvl", "SFoyer"), 1, 0) 
+test$Less_than_two_story <- ifelse(test$HouseStyle %in% c("1Story", "1.5Fin", "1.5Unf"), 1, 0)
+test$Two_story_plus <- ifelse(test$HouseStyle %in% c("2Story", "2.5Fin", "2.5Unf"), 1, 0)
+test$HouseStyle <- NULL
+test$RoofStyle <- NULL
+test$RoofMatl <- NULL
+test$Exterior1st <- NULL
+test$Exterior2nd <- NULL
+test$Foundation <- NULL
+test$hasMasVnr <- ifelse(is.na(test$MasVnrType), 0, 1)
+test$MasVnrType <- NULL
+test$BsmtQual = ifelse(is.na(test$BsmtQual), "None", test$BsmtQual) 
+test$BsmtCond = ifelse(is.na(test$BsmtCond), "None", test$BsmtCond) 
+test$BsmtExposure = ifelse(is.na(test$BsmtExposure), "No", test$BsmtExposure)
+test$BsmtFinType1[test$BsmtFinType1 %in% c("GLQ", "ALQ", "Rec")] <- 1 
+test$BsmtFinType1[test$BsmtFinType1 %in% c("BLQ", "LwQ", "Unf")] <- 0
+test$BsmtFinType1[is.na(test$BsmtFinType1)] <- 0
+test$BsmtFinType2[test$BsmtFinType2 %in% c("GLQ", "ALQ", "Rec")] <- 1 
+test$BsmtFinType2[test$BsmtFinType2 %in% c("BLQ", "LwQ", "Unf")] <- 0
+test$BsmtFinType2[is.na(test$BsmtFinType2)] <- 0
+test$Heating <- NULL
+test$CentralAir <- ifelse(test$CentralAir == "Y", 1, 0)
+test$Function <- NULL
+test$FireplaceQu = ifelse(is.na(test$FireplaceQu), "None", test$FireplaceQu) 
+test$GarageQual = ifelse(is.na(test$GarageQual), "None", test$GarageQual) 
+test$GarageCond = ifelse(is.na(test$GarageCond), "None", test$GarageCond) 
+test$HasGarage <- ifelse(is.na(test$GarageType), 0, 1)  
+test$GarageType <- NULL
+test$GarageFinish <- NULL
+test$PavedDrive[test$PavedDrive == "Y"] <- 1
+test$PavedDrive[!test$PavedDrive != "Y"] <- 0
+test$PavedDrive[is.na(test$PavedDrive)] <- 0
+test$Fence[test$Fence %in% c("GdPrv", "MnPrv", "GdWo","MnWw")] <- 1
+test$Fence[is.na(test$Fence)] <- 0
+mean(test$MiscVal[test$MiscVal != 0])
+test$MiscFeature <- NULL
+test$MiscVal <- NULL
+test$SaleType = NULL
+test$SaleCondition = NULL
+```
+
+12 Highest predictors:
+```{r}
+correlations <- cor(train[sapply(train, is.numeric)], train$SalePrice)
+sorted_correlations <- sort(abs(correlations[,1]), decreasing = TRUE)
+top_12_predictors <- names(sorted_correlations)[2:13]
+
+print(top_12_predictors)
+sorted_correlations[1:13]
+
+```
+
+We chose to apply a Forward Selection algorithm to find the best multiple linear regression model based on the highest correlation predictors to Sale Price (Y). We could have also used Backward elimination or stepwise, but we decided it would be too computationally intensive due to our large number of predictors. Thus, we started with a base model, and applied a forward selection to add predictors. 
+
+```{r}
+base_model <- lm(SalePrice ~ 1, data = train)
+library(MASS)
+best_model <- stepAIC(base_model, scope = list(lower = base_model, upper = ~ OverallQual + GrLivArea + ExterQual + KitchenQual + GarageCars + GarageArea + TotalBsmtSF), direction = "forward")
+```
+* Best Model (Step: AIC=30678.74):
+    * Model: SalePrice ~ OverallQual + GrLivArea + KitchenQual + GarageCars + TotalBsmtSF + ExterQual
+    * This model has the lowest AIC value of 30678.74, making it the best model among those evaluated.
+* 		Second Best Model (Step: AIC=30715.39):
+    * Model: SalePrice ~ OverallQual + GrLivArea + KitchenQual + GarageCars + TotalBsmtSF
+    * The second-best model includes all the variables from the best model except ExterQual. Its AIC value is slightly higher at 30715.39.
+* 		Third Best Model (Step: AIC=30812.04):
+    * Model: SalePrice ~ OverallQual + GrLivArea + KitchenQual + GarageCars
+    * The third-best model excludes TotalBsmtSF and ExterQual from the best model. It has an AIC value of 30812.04.
+These models are ranked based on their AIC values, where a lower AIC indicates a better balance of model fit and complexity. The top model is the one that provides the best trade-off between fitting the data well and not being overly complex. The second and third best models are progressively simpler, with slightly higher AIC values.
+
+K-fold CV (10 Folds): - on the top 3 models:
+```{r}
+library(caret)
+fitControl <- trainControl(method = "repeatedcv", number = 10, repeats = 3)
+
+
+model1_formula <- SalePrice ~ OverallQual + GrLivArea + KitchenQual + GarageCars + TotalBsmtSF + ExterQual
+model2_formula <- SalePrice ~ OverallQual + GrLivArea + KitchenQual + GarageCars + TotalBsmtSF
+model3_formula <- SalePrice ~ OverallQual + GrLivArea + KitchenQual + GarageCars
+
+
+set.seed(123)  # For reproducibility
+model1_cv <- train(model1_formula, data = train, method = "lm", trControl = fitControl)
+
+set.seed(123)
+model2_cv <- train(model2_formula, data = train, method = "lm", trControl = fitControl)
+
+set.seed(123)
+model3_cv <- train(model3_formula, data = train, method = "lm", trControl = fitControl)
+
+model1_cv$results
+model2_cv$results
+model3_cv$results
+
+```
+K-fold CV Results: 
+
+Model 1
+* RMSE: 36465.02
+* R-squared: 0.7925
+* MAE: 23136.1
+* RMSE SD: 8420.544
+* R-squared SD: 0.0850
+* MAE SD: 2011.868
+Model 2
+* RMSE: 36873.85
+* R-squared: 0.7872
+* MAE: 23642.17
+* RMSE SD: 8124.157
+* R-squared SD: 0.0820
+* MAE SD: 2176.002
+Model 3
+* RMSE: 38051.26
+* R-squared: 0.7721
+* MAE: 25503.92
+* RMSE SD: 5860.588
+* R-squared SD: 0.0601
+* MAE SD: 2239.503
+Interpretation and Comparison
+* Model 1 has the lowest RMSE and the highest R-squared, indicating it performs the best in terms of both error and the proportion of variance explained. Its MAE is also the lowest, suggesting better average prediction accuracy.
+* Model 2 shows slightly higher RMSE and MAE, and slightly lower R-squared, but these differences are relatively small.
+* Model 3 has the highest RMSE and MAE and the lowest R-squared, indicating it performs less effectively compared to the other two models.
+Conclusion
+* Model 1 appears to be the best model among the three based on these metrics. It offers a better balance of model complexity and predictive accuracy.
+* While Model 2 is close in performance, Model 1's slightly better metrics across the board make it a preferable choice.
+* Model 3, being the simplest, has the lowest performance and might be too simplistic for the complexity inherent in the data.
+
+AIC-Based Model Selection:
+    * AIC (Akaike Information Criterion) focuses on the trade-off between the goodness of fit of the model and its complexity. It penalizes models with more parameters to avoid overfitting.
+    * The model with the lowest AIC is considered the best in balancing fit and simplicity.
+    * In your case, the AIC-based selection identified SalePrice ~ OverallQual + GrLivArea + KitchenQual + GarageCars + TotalBsmtSF + ExterQual as the best model, which had the lowest AIC score.
+* 		Cross-Validation Performance:
+    * Cross-validation assesses a model's ability to generalize to an independent dataset. It provides a more direct measurement of how well a model performs on unseen data.
+    * The metrics like RMSE, R-squared, and MAE give a practical sense of prediction error and variance explanation.
+    * Your cross-validation results showed that the same model (Model 1) also performed the best in terms of these metrics.
+
+This is expected and reassuring when both AIC-based selection and cross-validation point towards the same model as being optimal. It suggests that the model not only balances complexity and fit well (as per AIC) but also generalizes effectively to new data (as indicated by cross-validation).
+
+Diagnostics:
+```{r}
+model1 <- lm(model1_formula, data = train)
+
+# Residuals vs Fitted Values
+plot(model1$fitted.values, residuals(model1), 
+     xlab = "Fitted Values", 
+     ylab = "Residuals", 
+     main = "Residuals vs Fitted Values")
+abline(h = 0, col = "red")
+
+# Normal Q-Q Plot
+qqnorm(residuals(model1))
+qqline(residuals(model1), col = "red")
+
+
+# Shapiro-Wilk Test
+shapiro.test(residuals(model1))
+
+# install.packages("lmtest")
+library(lmtest)
+
+# Breusch-Pagan Test
+bptest(model1)
+
+# install.packages("lmtest")
+library(lmtest)
+
+# Breusch-Pagan Test
+bptest(model1)
+
+# install.packages("car")
+library(car)
+
+# Variance Inflation Factor
+vif(model1)
+
+# install.packages("car")
+library(car)
+
+# Plot for Outliers and Leverage
+influencePlot(model1, id.method = "identify", main = "Influence Plot", sub = "Circle size is proportional to Cook's distance")
+
+
+```
+Shapiro-Wilk Normality Test
+* Result: W = 0.80807, p-value < 2.2e-16
+* Interpretation: This test checks whether the residuals of your model are normally distributed. A significant p-value (in this case, less than 2.2e-16) suggests that the residuals are not normally distributed. This is a violation of one of the key assumptions of linear regression.
+Breusch-Pagan Test
+* Result: BP = 398.38, df = 10, p-value < 2.2e-16
+* Interpretation: This test assesses homoscedasticity, meaning whether the residuals have constant variance across the range of predictors. The very low p-value here indicates that the residuals do not have constant variance (heteroscedasticity). This is another violation of linear regression assumptions.
+Variance Inflation Factor (VIF)
+* Result: VIF values are provided for each predictor.
+* Interpretation: VIF values greater than 5 or 10 can indicate problematic multicollinearity. In your case, the VIF values seem to be within an acceptable range, suggesting multicollinearity is not a major concern for this model.
+Influence Plot (Outliers and High-Leverage Points)
+* Result: Specific points (e.g., 524, 636, 1299) have been identified with significant studentized residuals or high Cook's distances.
+* Interpretation: These points may be outliers or have high leverage, potentially influencing the model disproportionately. It's worth investigating these points to see if they are data entry errors, require transformation, or are valid extreme values.
+
+Residuals vs Fitted Plot Observation
+* Observation: If the spread of residuals (the width of the scatter plot points) increases or decreases as you move along the fitted values, it suggests a pattern of heteroscedasticity, meaning the variance of the residuals is not constant across the range of fitted values.
+* Interpretation: A fan or funnel-like shape in this plot is a typical sign of heteroscedasticity.
+Breusch-Pagan Test Result
+* Result: BP = 398.38, df = 10, p-value < 2.2e-16
+* Interpretation: The very low p-value in the Breusch-Pagan test indicates that there is significant heteroscedasticity in the model. This means that the assumption of constant variance in the residuals is violated.
+
+Shapiro-Wilk Test Result
+* Result: W = 0.80807, p-value < 2.2e-16
+* Interpretation: The very small p-value indicates a significant deviation from normality. In other words, the distribution of residuals does not align well with what would be expected if they were normally distributed.
+Q-Q Plot Observation
+* Observation: An increase in the upper tail deviating from the line.
+* Interpretation: This specific pattern in the Q-Q plot suggests that the residuals have a heavier upper tail than a normal distribution would. This means there are more extreme values (larger residuals) than you would expect under normality.
+
+Logistic Regression (using a backwards selection algorithm): 
+```{r}
+
+# Categorizing Sale Price into High and Low based on the median
+median_price <- median(train$SalePrice)
+train$PriceCategory <- ifelse(train$SalePrice > median_price, "High", "Low")
+train$PriceCategoryBinary <- ifelse(train$PriceCategory == "High", 1, 0)
+
+# Assuming you have already loaded the MASS package for stepAIC
+library(MASS)
+
+# Fit the full logistic regression model with all the specified predictors
+full_log_model <- glm(PriceCategoryBinary ~ OverallQual + GrLivArea + ExterQual + KitchenQual + GarageCars + GarageArea + TotalBsmtSF + Neighborhood + TotalBaths + BsmtQual + TotRmsAbvGrd + AgeAtSale, data = train, family = binomial)
+
+# Apply backward elimination to find the most optimal model
+optimal_log_model <- stepAIC(full_log_model, direction = "backward")
+
+# View the summary of the optimal model
+summary(optimal_log_model)
+
+
+```
+* 		The Final Model (Step with the Lowest AIC): This model has the combination of predictors that results in the lowest AIC, suggesting it's the best balance of model complexity and goodness of fit.
+    * Model: PriceCategoryBinary ~ OverallQual + GrLivArea + KitchenQual + GarageCars + TotalBsmtSF + Neighborhood + TotalBaths + BsmtQual
+    * AIC: 663.94
+* 		Model Just Before the Last Predictor Was Removed: This model includes all predictors from the final model plus the last predictor that was removed.
+    * The last predictor removed: TotRmsAbvGrd (Based on the step before the final model)
+    * Model: PriceCategoryBinary ~ OverallQual + GrLivArea + KitchenQual + GarageCars + TotalBsmtSF + Neighborhood + TotalBaths + BsmtQual + TotRmsAbvGrd
+    * AIC: 665.04
+* 		Model Before the Second-Last Predictor Was Removed: This model includes all predictors from the second model plus the second-last predictor that was removed.
+    * The second-last predictor removed: AgeAtSale (Based on the step before the second model)
+    * Model: PriceCategoryBinary ~ OverallQual + GrLivArea + KitchenQual + GarageCars + TotalBsmtSF + Neighborhood + TotalBaths + BsmtQual + TotRmsAbvGrd + AgeAtSale
+    * AIC: 667.01
+
+K-fold for Logistic Regression: 
+
+```{r}
+library(caret)
+
+# Ensure PriceCategoryBinary is a factor with valid level names
+train$PriceCategoryBinary <- factor(train$PriceCategoryBinary, levels = c(0, 1), labels = c("Low", "High"))
+
+# Check the levels to ensure they are now valid R variable names
+levels(train$PriceCategoryBinary)
+
+
+model1_formula <- PriceCategoryBinary ~ OverallQual + GrLivArea + KitchenQual + GarageCars + TotalBsmtSF + Neighborhood + TotalBaths + BsmtQual
+model2_formula <- PriceCategoryBinary ~ OverallQual + GrLivArea + KitchenQual + GarageCars + TotalBsmtSF + Neighborhood + TotalBaths + BsmtQual + TotRmsAbvGrd
+model3_formula <- PriceCategoryBinary ~ OverallQual + GrLivArea + KitchenQual + GarageCars + TotalBsmtSF + Neighborhood + TotalBaths + BsmtQual + TotRmsAbvGrd + AgeAtSale
+
+
+# Define control parameters for k-fold cross-validation
+fitControl <- trainControl(method = "cv", 
+                           number = 10, 
+                           classProbs = TRUE, # important for AUC
+                           summaryFunction = twoClassSummary) # Use AUC, Sensitivity, etc.
+
+
+
+# Define the metric to optimize
+metric <- "ROC"  # You can also use "Acc" for Accuracy
+
+
+# Model Formulas
+# (Assuming you have defined model1_formula, model2_formula, model3_formula)
+
+# K-fold cross-validation for each model
+cv_model1 <- train(model1_formula, data = train, method = "glm", 
+                   family = "binomial", metric = metric, trControl = fitControl)
+cv_model2 <- train(model2_formula, data = train, method = "glm", 
+                   family = "binomial", metric = metric, trControl = fitControl)
+cv_model3 <- train(model3_formula, data = train, method = "glm", 
+                   family = "binomial", metric = metric, trControl = fitControl)
+
+# View the results of cross-validation for each model
+cv_model1$results
+cv_model2$results
+cv_model3$results
+
+```
+
+Model 1 (OverallQual + GrLivArea + KitchenQual + GarageCars + TotalBsmtSF + Neighborhood + TotalBaths + BsmtQual):
+
+ROC: 0.9671 (SD: 0.0131)
+Sensitivity: 0.9207 (SD: 0.0288)
+Specificity: 0.9176 (SD: 0.0273)
+Model 2 (Adds TotRmsAbvGrd to Model 1):
+
+ROC: 0.9670 (SD: 0.0121)
+Sensitivity: 0.9181 (SD: 0.0287)
+Specificity: 0.9149 (SD: 0.0375)
+Model 3 (Adds AgeAtSale to Model 2):
+
+ROC: 0.9676 (SD: 0.0181)
+Sensitivity: 0.9166 (SD: 0.0419)
+Specificity: 0.9149 (SD: 0.0321)
+In terms of ROC, all three models perform similarly, with values around 0.967, indicating a strong ability to differentiate between the two categories of Sale Price. The Sensitivity and Specificity values are also quite close across the models, although Model 1 shows slightly higher Sensitivity, meaning it's marginally better at identifying the 'High' category correctly.
+
+Diagnostics: 
+
+```{r}
+# Predict on training data
+predicted_classes <- predict(cv_model1, newdata = train, type = "raw")
+confusionMatrix(predicted_classes, train$PriceCategoryBinary)
+```
+
+
+```{r}
+library(pROC)
+# Predict probabilities
+predicted_probs <- predict(cv_model1, newdata = train, type = "prob")
+roc_response <- roc(response = train$PriceCategoryBinary, predictor = predicted_probs[, "High"])
+
+# Plot ROC Curve
+plot(roc_response, main = "ROC Curve")
+
+```
+
+
+
+```{r}
+# Calculate residuals
+log_model1 <- glm(model1_formula, data = train, family = "binomial")
+residuals_df <- data.frame(Fitted = fitted(log_model1), Residuals = residuals(log_model1, type = "deviance"))
+
+# Residuals vs Fitted Plot
+ggplot(residuals_df, aes(x = Fitted, y = Residuals)) +
+  geom_point() +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(title = "Residuals vs Fitted", x = "Fitted Values", y = "Deviance Residuals")
+
+```
+
+
+
+
+```{r}
+library(car)
+# Load the car package
+library(car)
+
+# Assuming log_model1 is your logistic regression model object
+# Replace 'log_model1' with your actual model name
+
+# Influence Index Plot for Cook's Distance
+influenceIndexPlot(log_model1, vars = "Cook")
+
+# Influence Index Plot for Leverage (hat values)
+influenceIndexPlot(log_model1, vars = "hat")
+
+
+```
+
+
+
+
+```{r}
+# Assuming 'log_model' is your fitted logistic regression model
+# and 'train' is your dataset
+
+# Step 1: Compute Influence Measures
+influence_measures <- broom::augment(log_model1, train)
+
+# Step 2: Plotting Influence Measures
+
+# Plot Standardized Residuals
+plot(influence_measures$.hat, influence_measures$.std.resid,
+     xlab = "Leverage (Hat values)",
+     ylab = "Standardized Residuals",
+     main = "Influence Plot for Logistic Regression")
+abline(h = c(-3, 3), col = "red", lty = 2)  # Adding reference lines for residuals
+
+# Identifying points with high leverage or large residuals
+identify(influence_measures$.hat, influence_measures$.std.resid, labels = row.names(influence_measures))
+```
+
+
+
+```{r}
+library(ResourceSelection)
+predicted_probs <- predict(log_model1, newdata = train, type = "response")
+
+# Conduct the Hosmer-Lemeshow test
+hoslem.test(x = train$PriceCategoryBinary, y = predicted_probs, g = 10)
+```
+
+
